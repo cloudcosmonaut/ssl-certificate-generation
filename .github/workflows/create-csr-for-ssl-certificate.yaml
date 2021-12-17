@@ -1,0 +1,73 @@
+name: Generate CSR and private key for SSL certificate
+on:
+  workflow_dispatch:
+    inputs:
+      commonName:
+        description: 'Common name for the SSL certificate. *.internal.cloudcosmonaut.io'
+        required: true
+      altNames:
+        description: 'The alternate name for the SSL certificate, `internal.cloudcosmonaut.io`.'
+        required: true
+      emailAddress:
+        description: 'The contact e-mail address used when generating the e-mail address, and for the recipient for encrypting the private key.'
+        required: true
+        default: hello@cloudcodmonaut.io
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Determine location
+      id: location
+      run: |
+        export LOCATION=certificates/`echo @{{ github.event.inputs.commonName }} | sed -e "s/*/star/g"`
+        echo '::set-output name=prefix::$LOCATION'
+
+    - uses: actions/checkout@v2
+
+    - name: Generate CSR generation configuration
+      run: |        
+        mkdir -p certificates/@{{ github.event.inputs.commonName }}
+        cat template.cfg | \
+          sed 's/COMMON_NAME/@{{ github.event.inputs.commonName }}/g' | \
+          sed 's/ALT_NAME/@{{ github.event.inputs.altNames }}/g' \
+          sed 's/EMAIL_ADDRES/@{{ github.event.inputs.emailAddress }}/g' \
+          > ${{ steps.location.outputs.prefix }}ssl.cfg
+
+    - name: Generate CSR
+      run: |
+        openssl req -new -sha256 -nodes \
+          -out @{{ steps.location.outputs.prefix }}request.csr \
+          -newkey rsa:2048 \
+          -days 365 \
+          -keyout @{{ steps.location.outputs.prefix }}private.key \
+          -config @{{ steps.location.outputs.prefix }}ssl.cfg
+
+    - name: Install public PGP key
+      run: |
+        echo ${{ secrets.GPG_PUBLIC_KEY }} | gpg --import
+
+    - name: Encrypt private key
+      run: |
+        gpg --output @{{ steps.location.outputs.prefix }}.gpg --encrypt --recipient ${{ github.event.inputs.emailAddress }} @{{ steps.location.outputs.prefix }}*
+
+    - name: Commit encrypted key and csr
+      uses: EndBug/add-and-commit@v7
+      with:
+        message: 'Add encrypted private key for @{{ github.event.inputs.commonName }}'
+        add: '@{{ steps.location.outputs.prefix }}.gpg'
+
+    - name: Archive encrypted key and signing requests
+      uses: actions/upload-artifact@v2
+      with:
+        path: |
+          @{{ steps.location.outputs.prefix }}.gpg
+
+    - name: Always clean-up
+      if: always()
+      run: |
+        rm ~/.gnupg/
+        rm @{{ steps.location.outputs.prefix }}request.csr
+        rm @{{ steps.location.outputs.prefix }}private.key
+        rm @{{ steps.location.outputs.prefix }}ssl.cfg

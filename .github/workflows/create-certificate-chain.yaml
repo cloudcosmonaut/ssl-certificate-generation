@@ -1,0 +1,64 @@
+name: Create certificate chain
+
+on:
+  workflow_dispatch:
+    inputs:
+      commonName:
+        description: 'Common Name of the SSL certificate e.g. `*.internal.cloudcosmonaut.io`'
+        required: true
+      emailAddress:
+        description: 'The contact e-mail address used when generating the e-mail address, and for the recipient for encrypting the private key.'
+        required: true
+        default: hello@cloudcodmonaut.io
+
+  push:
+
+jobs:
+  create-der:
+    runs-on: vm
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Install RISE PGP private key
+      run: |
+        echo -n "$GPG_SIGNING_KEY" | base64 --decode | gpg --import
+      env:
+        GPG_SIGNING_KEY: ${{ secrets.RISE_PGP_KEY }}
+
+    - name: Decrypt private key
+      run: |
+        export COMMON_NAME=`echo ${{ github.event.inputs.commonName }} | sed 's/*/star/g'`
+
+        gpg --decrypt encrypted-keys/$COMMON_NAME.gpg > private.key
+
+    - name: Compare fingerprint of certificate and private keys
+      run: |
+        export COMMON_NAME=`echo ${{ github.event.inputs.commonName }} | sed 's/*/star/g'`
+        export KEY_MD5=$(echo `openssl rsa -noout -modulus -in private.key | openssl md5  | cut -d= -f2`)
+        export CERT_MD5=$(echo `openssl x509 -noout -modulus -in certificates/$COMMON_NAME.crt | openssl md5 | cut -d= -f2`)
+
+        if [ $KEY_MD5 -ne $CERT_MD5 ]; then
+          echo "The private key and certificate are not frm the same CSR"
+          exit 9
+        fi
+
+    - name: Combine private key, certificate and intermediate CA's
+      run: |
+        export COMMON_NAME=`echo ${{ github.event.inputs.commonName }} | sed 's/*/star/g'`
+        cat private.key certificates/$COMMON_NAME.crt certificates/DigiCertCA.crt certificates/TrustedRoot.crt > $COMMON_NAME.pem
+        gpg --output $COMMON_NAME.gpg --encrypt --recipient ${{ github.event.inputs.emailAddress }} --trust-model always
+
+    - name: Archive encrypted certificate chain
+      uses: actions/upload-artifact@v2
+      with:
+        path: |
+          $COMMON_NAME.gpg
+
+    - name: Clean-up files
+      if: always()
+      run: |
+        rm -rf ~/.gnupg/
+        rm -f private.key
+        rm -f $COMMON_NAME.pem
+        rm -f $COMMON_NAME.gpg
